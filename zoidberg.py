@@ -386,3 +386,150 @@ def visualise_tsne(X_train, y_train, n_samples: int = 250):
     print(f"  Saved: {p}")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. ML PIPELINES, CROSS-VALIDATION, TUNING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_pipelines() -> dict[str, Pipeline]:
+    """sklearn Pipeline per model: StandardScaler → classifier.
+
+    Pipelines guarantee that the scaler is fitted only on training folds
+    during cross-validation — preventing data leakage.
+    """
+    return {
+        "Logistic Regression": Pipeline([
+            ("scaler", StandardScaler()),
+            ("clf",    LogisticRegression(max_iter=1000, C=1.0, random_state=42)),
+        ]),
+        "KNN": Pipeline([
+            ("scaler", StandardScaler()),
+            ("clf",    KNeighborsClassifier(n_neighbors=5)),
+        ]),
+        "Random Forest": Pipeline([
+            ("scaler", StandardScaler()),
+            ("clf",    RandomForestClassifier(n_estimators=100, n_jobs=-1, random_state=42)),
+        ]),
+        "SVM": Pipeline([
+            ("scaler", StandardScaler()),
+            ("clf",    SVC(kernel="rbf", probability=True, random_state=42)),
+        ]),
+    }
+
+
+def run_cross_validation(pipelines, X_train, y_train, cv_folds: int = 5) -> dict:
+    """StratifiedKFold CV — preserves class ratio in every fold."""
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
+    cv_results = {}
+
+    print(f"\n{'─'*65}")
+    print(f"  {cv_folds}-Fold Stratified Cross-Validation (scoring: ROC-AUC)")
+    print(f"{'─'*65}")
+
+    for name, pipe in pipelines.items():
+        t0     = time.time()
+        scores = cross_val_score(pipe, X_train, y_train,
+                                 cv=cv, scoring="roc_auc", n_jobs=-1)
+        elapsed = time.time() - t0
+        cv_results[name] = scores
+        print(f"  {name:<22}  AUC = {scores.mean():.3f} ± {scores.std():.3f}  ({elapsed:.1f}s)")
+
+    return cv_results
+
+
+def train_and_evaluate(pipelines, X_train, X_val, X_test,
+                       y_train, y_val, y_test) -> dict:
+    """Fit on train, validate on val, final score on test (proc_tvt)."""
+    results = {}
+    print(f"\n{'─'*72}")
+    print(f"  Train → Val → Test Evaluation")
+    print(f"{'─'*72}")
+    print(f"  {'Model':<22} {'Val Acc':>8} {'Val AUC':>8} {'Test Acc':>9} {'Test AUC':>9} {'F1':>6}")
+    print(f"  {'─'*22} {'─'*8} {'─'*8} {'─'*9} {'─'*9} {'─'*6}")
+
+    for name, pipe in pipelines.items():
+        pipe.fit(X_train, y_train)
+
+        vp  = pipe.predict(X_val);        vpr = pipe.predict_proba(X_val)[:, 1]
+        tp  = pipe.predict(X_test);       tpr = pipe.predict_proba(X_test)[:, 1]
+
+        va  = accuracy_score(y_val,  vp);  vau = roc_auc_score(y_val,  vpr)
+        ta  = accuracy_score(y_test, tp);  tau = roc_auc_score(y_test, tpr)
+        f1  = f1_score(y_test, tp)
+
+        results[name] = dict(
+            pipe=pipe, val_pred=vp, val_proba=vpr,
+            test_pred=tp, test_proba=tpr,
+            val_acc=va, val_auc=vau, test_acc=ta, test_auc=tau, f1=f1,
+        )
+        print(f"  {name:<22} {va:>8.3f} {vau:>8.3f} {ta:>9.3f} {tau:>9.3f} {f1:>6.3f}")
+
+    return results
+
+
+def hyperparameter_tuning(X_train, y_train) -> dict:
+    """GridSearchCV on Random Forest and Logistic Regression (algo_tuning)."""
+    print(f"\n{'─'*65}")
+    print("  Hyperparameter Tuning — GridSearchCV (3-fold, scoring: AUC)")
+    print(f"{'─'*65}")
+    tuned = {}
+
+    rf_pipe = Pipeline([("sc", StandardScaler()),
+                        ("clf", RandomForestClassifier(n_jobs=-1, random_state=42))])
+    rf_grid = {
+        "clf__n_estimators":   [50, 100],
+        "clf__max_depth":      [None, 10, 20],
+        "clf__min_samples_split": [2, 5],
+    }
+    rf_gs = GridSearchCV(rf_pipe, rf_grid, cv=3, scoring="roc_auc", n_jobs=-1)
+    rf_gs.fit(X_train, y_train)
+    print(f"  Random Forest  best_params={rf_gs.best_params_}  AUC={rf_gs.best_score_:.3f}")
+    tuned["Random Forest"] = rf_gs
+
+    lr_pipe = Pipeline([("sc", StandardScaler()),
+                        ("clf", LogisticRegression(max_iter=1000, random_state=42))])
+    lr_grid = {"clf__C": [0.01, 0.1, 1.0, 10.0]}
+    lr_gs = GridSearchCV(lr_pipe, lr_grid, cv=3, scoring="roc_auc", n_jobs=-1)
+    lr_gs.fit(X_train, y_train)
+    print(f"  Logistic Reg   best_params={lr_gs.best_params_}  AUC={lr_gs.best_score_:.3f}")
+    tuned["Logistic Regression"] = lr_gs
+
+    return tuned
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. MODEL PERSISTENCE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def save_ml_models(results: dict, pca: PCA):
+    """Persist all sklearn pipelines + PCA to disk with joblib (data_persistency)."""
+    for name, res in results.items():
+        slug = name.lower().replace(" ", "_")
+        path = f"{MODELS_DIR}/{slug}_pipeline.joblib"
+        joblib.dump(res["pipe"], path)
+        print(f"  Saved: {path}")
+    joblib.dump(pca, f"{MODELS_DIR}/pca.joblib")
+    print(f"  Saved: {MODELS_DIR}/pca.joblib")
+
+
+def load_ml_model(name: str):
+    slug = name.lower().replace(" ", "_")
+    path = f"{MODELS_DIR}/{slug}_pipeline.joblib"
+    return joblib.load(path) if Path(path).exists() else None
+
+
+def save_cnn_model(model: nn.Module, path: str | None = None):
+    p = path or f"{MODELS_DIR}/cnn.pt"
+    torch.save(model.state_dict(), p)
+    print(f"  Saved CNN state dict: {p}")
+
+
+def load_cnn_model(path: str | None = None) -> nn.Module | None:
+    p = path or f"{MODELS_DIR}/cnn.pt"
+    if not Path(p).exists():
+        return None
+    m = SimpleCNN()
+    m.load_state_dict(torch.load(p, map_location="cpu", weights_only=True))
+    m.eval()
+    return m
+
+
