@@ -194,3 +194,195 @@ def load_dataset(data_path: str, max_per_class_train: int = 350,
     return X_train, X_val, X_test, y_train, y_val, y_test
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 3. DATA VISUALISATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def visualise_samples(data_path: str):
+    """Grid of sample X-ray images with labels (data_visuals)."""
+    fig, axes = plt.subplots(2, 5, figsize=(15, 6))
+    fig.suptitle("Sample Chest X-Rays — NORMAL (top) vs PNEUMONIA (bottom)",
+                 fontsize=14, fontweight="bold")
+
+    base = Path(data_path)
+    for row, (cls, color) in enumerate([("NORMAL", "green"), ("PNEUMONIA", "red")]):
+        files = sorted((base / "train" / cls).glob("*.jpeg"))[:5]
+        for col, f in enumerate(files):
+            ax = axes[row, col]
+            ax.imshow(np.array(Image.open(f).convert("L").resize((128, 128))), cmap="gray")
+            ax.set_title(cls, color=color, fontsize=9, fontweight="bold")
+            ax.axis("off")
+            ax.set_xlabel(f.name[:20], fontsize=6)
+
+    plt.tight_layout()
+    p = f"{RESULTS_DIR}/sample_images.png"
+    plt.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {p}")
+
+
+def visualise_class_distribution():
+    """Bar + pie charts showing dataset imbalance (data_visuals)."""
+    splits = {
+        "Train": {"NORMAL": 1341, "PNEUMONIA": 3875},
+        "Val":   {"NORMAL": 8,    "PNEUMONIA": 8},
+        "Test":  {"NORMAL": 234,  "PNEUMONIA": 390},
+    }
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle("Dataset Class Distribution", fontsize=14, fontweight="bold")
+
+    x      = np.arange(len(splits))
+    width  = 0.35
+    norms  = [v["NORMAL"]    for v in splits.values()]
+    pneums = [v["PNEUMONIA"] for v in splits.values()]
+
+    b1 = axes[0].bar(x - width / 2, norms,  width, label="NORMAL",    color="#2196F3", alpha=0.85)
+    b2 = axes[0].bar(x + width / 2, pneums, width, label="PNEUMONIA", color="#F44336", alpha=0.85)
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(splits.keys())
+    axes[0].set_xlabel("Split")
+    axes[0].set_ylabel("Number of images")
+    axes[0].set_title("Image Count per Split and Class")
+    axes[0].legend()
+    axes[0].bar_label(b1, padding=3, fontsize=8)
+    axes[0].bar_label(b2, padding=3, fontsize=8)
+
+    axes[1].pie(
+        [1341, 3875],
+        labels=["NORMAL\n(26%)", "PNEUMONIA\n(74%)"],
+        colors=["#2196F3", "#F44336"],
+        autopct="%1.1f%%",
+        startangle=90,
+        explode=[0.05, 0],
+        shadow=True,
+    )
+    axes[1].set_title("Train Set Class Imbalance")
+
+    plt.tight_layout()
+    p = f"{RESULTS_DIR}/class_distribution.png"
+    plt.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {p}")
+
+
+def visualise_augmentation_examples(data_path: str):
+    """Show one original image + 4 augmented variants (data_variation)."""
+    from PIL import ImageEnhance
+    import random
+
+    src = sorted((Path(data_path) / "train" / "PNEUMONIA").glob("*.jpeg"))[0]
+    orig = Image.open(src).convert("L").resize((128, 128))
+
+    def _augment(img, seed):
+        r = random.Random(seed)
+        img = img.rotate(r.uniform(-20, 20), resample=Image.BILINEAR)
+        if r.random() < 0.5:
+            img = img.transpose(Image.FLIP_LEFT_RIGHT)
+        img = ImageEnhance.Brightness(img).enhance(r.uniform(0.6, 1.4))
+        img = ImageEnhance.Contrast(img).enhance(r.uniform(0.7, 1.3))
+        scale = r.uniform(0.8, 1.0)
+        w, h  = img.size
+        nw, nh = int(w * scale), int(h * scale)
+        l = r.randint(0, w - nw)
+        t = r.randint(0, h - nh)
+        img = img.crop((l, t, l + nw, t + nh)).resize((w, h), Image.BILINEAR)
+        tx = int(r.uniform(-0.1, 0.1) * w)
+        ty = int(r.uniform(-0.1, 0.1) * h)
+        img = img.transform(img.size, Image.AFFINE, (1, 0, tx, 0, 1, ty),
+                            resample=Image.BILINEAR)
+        return img
+
+    variants = [orig] + [_augment(orig, s) for s in range(4)]
+    titles   = ["Original", "Rotation+Flip", "Brightness", "Contrast", "Zoom+Shift"]
+
+    fig, axes = plt.subplots(1, 5, figsize=(15, 3))
+    fig.suptitle("Data Augmentation Examples (PNEUMONIA X-Ray)",
+                 fontsize=13, fontweight="bold")
+    for ax, img, title in zip(axes, variants, titles):
+        ax.imshow(np.array(img), cmap="gray")
+        ax.set_title(title, fontsize=9)
+        ax.axis("off")
+
+    plt.tight_layout()
+    p = f"{RESULTS_DIR}/augmentation_examples.png"
+    plt.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {p}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 4. DIMENSIONALITY REDUCTION (PCA + t-SNE)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def apply_pca(X_train, X_val, X_test, y_train, n_components: int = 50):
+    """Reduce 4096-dim flat vectors with PCA; visualise scree + 2D projection."""
+    pca = PCA(n_components=n_components, random_state=42)
+    Xtr = pca.fit_transform(X_train)
+    Xvl = pca.transform(X_val)
+    Xte = pca.transform(X_test)
+
+    var = pca.explained_variance_ratio_.sum() * 100
+    print(f"\n  PCA: {X_train.shape[1]}D → {n_components}D  "
+          f"(cumulative explained variance: {var:.1f}%)")
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+    fig.suptitle("PCA — Dimensionality Reduction", fontsize=13, fontweight="bold")
+
+    # Scree / cumulative variance
+    cumvar = np.cumsum(pca.explained_variance_ratio_) * 100
+    axes[0].plot(cumvar, "b-o", markersize=3)
+    axes[0].axhline(95, color="red", linestyle="--", alpha=0.8, label="95% threshold")
+    axes[0].axhline(var, color="orange", linestyle="--", alpha=0.8,
+                    label=f"{n_components} components ({var:.1f}%)")
+    axes[0].set_xlabel("Number of components")
+    axes[0].set_ylabel("Cumulative explained variance (%)")
+    axes[0].set_title("Scree Plot — Cumulative Variance")
+    axes[0].legend(fontsize=8)
+
+    # 2D PCA scatter
+    pca2  = PCA(n_components=2, random_state=42)
+    X_2d  = pca2.fit_transform(X_train)
+    for lbl, color, name in [(0, "#2196F3", "NORMAL"), (1, "#F44336", "PNEUMONIA")]:
+        mask = y_train == lbl
+        axes[1].scatter(X_2d[mask, 0], X_2d[mask, 1],
+                        c=color, label=name, alpha=0.45, s=14)
+    axes[1].set_xlabel("PC 1")
+    axes[1].set_ylabel("PC 2")
+    axes[1].set_title("2D PCA Projection — Training Set")
+    axes[1].legend()
+
+    plt.tight_layout()
+    p = f"{RESULTS_DIR}/pca_analysis.png"
+    plt.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {p}")
+
+    return Xtr, Xvl, Xte, pca
+
+
+def visualise_tsne(X_train, y_train, n_samples: int = 250):
+    """t-SNE 2D embedding of high-dimensional image vectors."""
+    idx  = np.random.default_rng(42).choice(len(X_train), min(n_samples, len(X_train)), replace=False)
+    X_s, y_s = X_train[idx], y_train[idx]
+
+    print(f"\n  Computing t-SNE on {len(X_s)} samples…")
+    t0   = time.time()
+    tsne = TSNE(n_components=2, perplexity=30, random_state=42, n_iter=500)
+    X_em = tsne.fit_transform(X_s)
+    print(f"  t-SNE done in {time.time() - t0:.1f}s")
+
+    plt.figure(figsize=(8, 6))
+    for lbl, color, name in [(0, "#2196F3", "NORMAL"), (1, "#F44336", "PNEUMONIA")]:
+        mask = y_s == lbl
+        plt.scatter(X_em[mask, 0], X_em[mask, 1], c=color, label=name, alpha=0.6, s=20)
+    plt.xlabel("t-SNE dimension 1")
+    plt.ylabel("t-SNE dimension 2")
+    plt.title("t-SNE Visualisation of Chest X-Ray Feature Space")
+    plt.legend()
+    plt.tight_layout()
+    p = f"{RESULTS_DIR}/tsne.png"
+    plt.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {p}")
+
+
